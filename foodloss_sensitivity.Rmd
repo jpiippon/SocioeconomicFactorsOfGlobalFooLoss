@@ -1,0 +1,306 @@
+---
+title: "Daniel food loss revision"
+author: "Johannes Piipponen"
+date: "`Spring 2023"
+output: html_document
+---
+
+Code written by Johannes Piipponen
+
+# Get and explore data
+
+```{r}
+# Load necessary libraries
+library(tidyverse)
+library(fixest)
+
+# Read the data
+df_raw <- read_csv("data_johannes.csv")
+
+# Add a new column ln_gni as the natural logarithm of gni
+df_raw <- df_raw %>% 
+  mutate(ln_gni = log(gni))
+
+# Explore data: number of countries, crops and years
+length(unique(df_raw$country)) # 81 countries
+unique(df_raw$year) %>% sort() # years 2000-2020
+
+
+
+# Group data by country and count the number of cases
+df_raw %>% 
+  group_by(country) %>% 
+  summarise(Number_of_cases = n()) %>% 
+  arrange(Number_of_cases)
+
+# Create a list of countries with more than 80 observations
+#my_cntrylist_over80 <- 
+my_countries_obs <-
+  df_raw %>% 
+  group_by(country) %>% 
+  summarise(Number_of_cases = n()) %>% 
+ # filter(Number_of_cases > 80) %>% 
+  arrange(Number_of_cases)# %>%   pull(country)
+
+
+```
+
+
+
+
+
+
+# Sensitivity analysis
+
+The following code performs a regression analysis using all available data and then explores the sensitivity of the model by excluding individual countries from the analysis.
+
+When all countries are included in the model, it produces specific values for the intercept and beta1 coefficients. However, if we exclude a particular country (e.g., Finland), these coefficient values may change. The objective is to determine the magnitude of these changes.
+
+The ultimate goal is to create a graph that visualizes how the regression results vary when we exclude one country at a time.
+
+Explanation for f_exclude_countries function:
+The f_exclude_countries function accepts the country to be excluded as an argument (country_tobe_excluded). It runs the feols model with the specified formula and filters the dataset so that the specified country is not included. After fitting the model, the function uses broom::tidy() to extract the regression results and selects the relevant columns (term, estimate, and p-value). Lastly, the function adds a new column, excluded_country, to indicate the country that was excluded in that particular model run.
+
+
+```{r}
+# Create a function to run feols excluding one country at a time
+f_exclude_countries <- function(country_tobe_excluded) {
+  feols(loss_percentage1 ~ ln_gni + agriShr + agriEmp + msch + 
+           electricityRural + phoneSub + polStab + export + regionalName + as.factor(year),
+         cluster = ~ regionalName, 
+         data = df_raw %>% filter(country != country_tobe_excluded)) %>%
+    broom::tidy() %>%
+    dplyr::select(term, estimate, p.value) %>%
+    mutate(excluded_country = country_tobe_excluded)
+}
+
+# Example function calls
+f_exclude_countries("Angola")
+f_exclude_countries("Burundi")
+
+# Use the function for all countries
+my_countries <- unique(df_raw$country)
+
+# Apply the function to all countries and store the results
+results <- map_df(my_countries, f_exclude_countries)
+
+# Widen the results and rename p-value columns ---> not sure if this is needed
+results_wider <- results %>%
+  pivot_wider(names_from = term, values_from = c(estimate, p.value)) %>%
+  rename(
+    pval_intercept = `p.value_(Intercept)`,
+    pval_ln_gni = `p.value_ln_gni`,
+    pval_agriShr = `p.value_agriShr`,
+    pval_agriEmp = `p.value_agriEmp`,
+    pval_msch = `p.value_msch`,
+    pval_electricityRural = `p.value_electricityRural`,
+    pval_phoneSub = `p.value_phoneSub`,
+    pval_polStab = `p.value_polStab`,
+    pval_export = `p.value_export`
+  )
+
+
+```
+
+
+# Save the original regression
+
+```{r}
+library(flextable)
+library(modelsummary)
+
+model <-   feols(loss_percentage1 ~ ln_gni + agriShr + agriEmp + msch + 
+                   electricityRural + phoneSub + polStab + export + regionalName + as.factor(year),
+                 cluster = ~ regionalName, 
+                 data = df_raw)
+
+
+
+# Create the table for the feols model
+model_table <- modelsummary(model, stars = T, output = "flextable")
+
+# uncomment this
+#save_as_docx(model_table, path = ("selected_results.docx"))
+```
+
+
+# Plot the results
+
+# Sensitivity like originally but when number of cases is used to define X axis
+
+```{r}
+results_arranged <- map_df(unique(my_countries_obs$country), f_exclude_countries)
+
+results_wider_arranged <- results_arranged %>%
+  pivot_wider(names_from = term, values_from = c(estimate, p.value)) %>%
+  rename(
+    pval_intercept = `p.value_(Intercept)`,
+    pval_ln_gni = `p.value_ln_gni`,
+    pval_agriShr = `p.value_agriShr`,
+    pval_agriEmp = `p.value_agriEmp`,
+    pval_msch = `p.value_msch`,
+    pval_electricityRural = `p.value_electricityRural`,
+    pval_phoneSub = `p.value_phoneSub`,
+    pval_polStab = `p.value_polStab`,
+    pval_export = `p.value_export`
+  )
+
+
+results_long_arranged <- results_wider_arranged %>%
+  pivot_longer(
+    cols = starts_with("estimate_"),
+    names_to = "variable",
+    values_to = "value"
+  ) %>% 
+  dplyr::select(excluded_country, variable, value) %>%
+  drop_na()
+
+
+
+# Select only some variables
+results_long_arranged <- results_long_arranged %>% 
+  filter(variable %in% c("estimate_(Intercept)", "estimate_ln_gni",                                 
+ "estimate_agriShr",                                  
+  "estimate_agriEmp",                                  
+  "estimate_msch",                                     
+  "estimate_electricityRural",                         
+  "estimate_phoneSub",                                 
+  "estimate_polStab",                                  
+  "estimate_export"   ))
+
+
+# Draw a combined plot
+library(scico)
+
+plt_combined_arranged <- ggplot(results_long_arranged, aes(x = factor(excluded_country, levels = unique(excluded_country)), y = value, color = variable, group = variable)) +
+  geom_line(size = 1.2) + 
+  facet_grid(variable ~ .,
+             scales = "free_y",
+             labeller = as_labeller(c("estimate_(Intercept)" = "Intercept",
+                                      estimate_ln_gni = "Log GNI",
+                                      estimate_agriShr = "Agri Share",
+                                      estimate_agriEmp = "Agri Emp",
+                                      estimate_msch = "Mean Sch",
+                                      estimate_electricityRural = "Elec Acc",
+                                      estimate_phoneSub = "Phone Sub",
+                                      estimate_polStab = "Pol Stab",
+                                      estimate_export = "Exports"))) +
+  theme_gray() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, size = 6),
+        axis.text.y = element_text(size = 8),
+        strip.text = element_text(size = 8),
+        legend.position = "none") +
+  scale_color_scico_d(palette = "roma") +
+  labs(title = "Impact of excluding a country on regression output",
+       x = "Excluded country countries with fewer observations         countries with more observations",
+       y = "Estimate")
+
+
+plt_combined_arranged
+
+# uncomment this
+
+# ggsave("sensitivity_plot_x_axis_based_on_N_obs.png", plot = plt_combined_arranged, dpi = 300, width = 300, height = 225, units = "mm")
+# 
+# ggsave("sensitivity_plot_x_axis_based_on_N_obs.pdf", plot = plt_combined_arranged)
+
+
+```
+
+
+# Same but regional variables 
+
+11] "estimate_regionalNameCentral & South Asia"         
+[12] "estimate_regionalNameEast & Southeast Asia"        
+[13] "estimate_regionalNameEurope & North America"       
+[14] "estimate_regionalNameLatin America & the Caribbean"
+[15] "estimate_regionalNameMiddle East & North Africa"   
+[16] "estimate_regionalNameSub-Saharan Africa" 
+
+```{r}
+# Prepare data for plotting
+results_long_reg <- results_wider %>%
+  pivot_longer(
+    cols = starts_with("estimate_regional"),
+    names_to = "variable",
+    values_to = "value"
+  ) %>% 
+  dplyr::select(excluded_country, variable, value)
+
+# Draw a combined plot
+plt_combined_reg <- ggplot(results_long_reg, aes(x = excluded_country, y = value, color = variable)) +
+  geom_point() +
+  facet_grid(variable ~ .,
+             scales = "free_y",
+             labeller = as_labeller(c("estimate_regionalNameCentral & South Asia" = "Cent & S Asia",
+                                      "estimate_regionalNameEast & Southeast Asia" = "E & SE Asia",
+                                      "estimate_regionalNameEurope & North America" = "Eur & N Am",
+                                      "estimate_regionalNameLatin America & the Caribbean" = "Lat Am & Car",
+                                      "estimate_regionalNameMiddle East & North Africa" = "MEast & N Af",
+                                      "estimate_regionalNameSub-Saharan Africa" = "Sub-Sah Africa"))) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none") +
+  labs(title = "Impact of excluding a country on regression output",
+    x = "Excluded Country",
+    y = "Estimate")
+
+
+plt_combined_reg
+
+# ggsave("sensitivity_plot_reg.png", plot = plt_combined_reg, dpi = 300, width = 300, height = 225, units = "mm")
+```
+
+# Sensitivity plot for years
+
+```{r}
+results_long_year <- results_wider %>%
+  pivot_longer(
+    cols = starts_with("estimate_as.factor"),
+    names_to = "variable",
+    values_to = "value"
+  ) %>% 
+  dplyr::select(excluded_country, variable, value)
+
+
+
+plt_combined_year <- ggplot(results_long_year, aes(x = excluded_country, y = value, color = variable)) +
+  geom_point() +
+  facet_grid(variable ~ ., scales = "free_y", labeller = as_labeller(c("estimate_as.factor(year)2001" = "2001",
+                                                                      "estimate_as.factor(year)2002" = "2002",
+                                                                      "estimate_as.factor(year)2003" = "2003",
+                                                                      "estimate_as.factor(year)2004" = "2004",
+                                                                      "estimate_as.factor(year)2005" = "2005",
+                                                                      "estimate_as.factor(year)2006" = "2006",
+                                                                      "estimate_as.factor(year)2007" = "2007",
+                                                                      "estimate_as.factor(year)2008" = "2008",
+                                                                      "estimate_as.factor(year)2009" = "2009",
+                                                                      "estimate_as.factor(year)2010" = "2010",
+                                                                      "estimate_as.factor(year)2011" = "2011",
+                                                                      "estimate_as.factor(year)2012" = "2012",
+                                                                      "estimate_as.factor(year)2013" = "2013",
+                                                                      "estimate_as.factor(year)2014" = "2014",
+                                                                      "estimate_as.factor(year)2015" = "2015",
+                                                                      "estimate_as.factor(year)2016" = "2016",
+                                                                      "estimate_as.factor(year)2017" = "2017",
+                                                                      "estimate_as.factor(year)2018" = "2018",
+                                                                      "estimate_as.factor(year)2019" = "2019",
+                                                                      "estimate_as.factor(year)2020" = "2020"))) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none") +
+  labs(title = "Impact of excluding a country on regression output",
+    x = "Excluded Country",
+    y = "Estimate")
+
+
+plt_combined_year
+
+# ggsave("sensitivity_plot_year.png", plot = plt_combined_year, dpi = 300, width = 300, height = 225, units = "mm")
+```
+
+
+
+
+#
+

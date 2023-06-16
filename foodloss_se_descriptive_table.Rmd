@@ -1,0 +1,63 @@
+---
+title: "SE descriptive"
+author: "Johannes Piipponen"
+date: "Spring 2023`"
+output: html_document
+---
+
+Code written by Johannes Piipponen
+
+
+# Create table of socio-economic variables
+
+
+
+```{r}
+library(plotrix)
+library(tidyverse)
+# Get Daniel's data
+daniel_original <- read.csv("data_johannes.csv")
+
+
+# Explore descriptive statistics using the original data
+df_se_descriptive <-
+  daniel_original %>% 
+  group_by(incLevel, basketItem2, food_supply_stage) %>%
+  summarise(foodloss_mean = mean(loss_percentage1),
+            StandardError = std.error(loss_percentage1),
+            N = n()) %>% 
+  mutate_if(is.numeric, round, digits = 3) 
+
+# alternatively, use data with polygons
+# df_se_descriptive <-
+#   country_data %>%
+#   st_drop_geometry() %>%
+#   group_by(incLevel, basketItem2, food_supply_stage) %>%
+#   summarise(foodloss_mean = mean(loss_percentage1),
+#             StandardError = std.error(loss_percentage1),
+#             N = n()) %>% 
+#   mutate_if(is.numeric, round, digits = 3) 
+
+
+# Modify the table to have L and M countries side by side
+df_se_descriptive_L <- df_se_descriptive %>% 
+  filter(incLevel == "L") %>% 
+  dplyr::select(-incLevel) 
+
+
+df_se_descriptive_M <- df_se_descriptive %>% 
+  filter(incLevel == "M") %>% 
+  dplyr::select(-incLevel) 
+
+# Join the modified tables
+df_se_table <- 
+  left_join(df_se_descriptive_L, df_se_descriptive_M,
+            by = c("basketItem2", "food_supply_stage"))
+
+df_se_table
+#View(df_se_table)
+
+
+
+```
+

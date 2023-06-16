@@ -1,0 +1,533 @@
+---
+title: "Food loss data and figures"
+author: "Johannes Piipponen"
+date: "Spring 2023"
+output: html_document
+---
+
+Code written by Johannes Piipponen
+
+
+
+Feel free to edit -- The code now includes multiple sections that involve repetitive copy-pasting and modification of similar elements. Instead of this approach, a more efficient solution could have been achieved by utilizing (stronger) functions, among other techniques.
+
+However, given the circumstances, this was the fastest way for me to complete the task and the easiest to debug.
+
+So, please be patient and allow the code to run. It may take some time, but it should work!
+- BR Johannes Piipponen
+
+# Load relevant packages
+
+```{r}
+# Define the required packages
+packages <- c("tidyverse", "scico", "tmap", "sf", "terra", "here")
+
+# Check if the packages are already installed
+not_installed <- packages[!(packages %in% installed.packages()[,"Package"])]
+
+# Install the packages if they are not already installed
+if (length(not_installed)) {
+  install.packages(not_installed)
+}
+
+# Load the required packages
+lapply(packages, require, character.only = TRUE)  # You can also use "library" instead of "require"
+
+```
+
+
+# Load some other functions, data etc
+
+```{r}
+# Create a template raster from scratch (needed later)
+template_rast_5arcmin <- 
+  rast(nrows = 2160, ncols = 4320, crs = "EPSG:4326")
+
+# ---------------- Load polygons that contain geometries for different countries
+# Originally loaded from https://www.naturalearthdata.com/downloads/
+# Simplified using ms_simplify and modified based on the code below
+
+# adm_10m <- here("Data", "Input", "ne_10m_admin_0_countries.shp") |>
+#   read_sf()
+# adm10_simple <- ms_simplify(adm_10m)  # 203 rows -- was 258
+
+# Change adm10 iso codes to fao codes
+# adm10_simple_faoadded <- adm10_simple %>%
+#   dplyr::select(ADMIN, NAME, SOVEREIGNT, ISO_A3_EH, REGION_UN) %>%
+#   as.data.frame() %>%
+#   st_drop_geometry()
+# 
+# adm10_simple_faoadded <- adm10_simple_faoadded %>%
+#   mutate(
+#     fao_from_iso3eh = countrycode(.$ISO_A3_EH, origin = "iso3c", destination = "fao"),
+#     fao_from_SOVEREIGNT = countrycode(.$SOVEREIGNT, origin = "country.name",  destination = "fao")
+#   )
+# ## Warns that some are missing. However, either fao_from_iso3eh or fao_from_SOVEREIGNT includes most
+# 
+# ## Give Somaliland FAO code of Somalia
+# adm10_simple_faoadded <- adm10_simple_faoadded %>%
+#   rows_update(
+#     .,
+#     tibble(
+#       SOVEREIGNT = "Somaliland",
+#       fao_from_SOVEREIGNT = (
+#         filter(adm10_simple_faoadded, SOVEREIGNT == "Somalia") %>%
+#         pull(fao_from_SOVEREIGNT)
+#       )
+#     )
+#   )
+# 
+# ## Combine columns fao_from_iso3eh and fao_from_SOVEREIGNT.
+# ## If any of the columns has a value, this value will be the FAO_ID
+# adm10_simple_faoadded <- adm10_simple_faoadded %>%
+#   mutate(FAO_ID = coalesce(fao_from_iso3eh, fao_from_SOVEREIGNT)) %>%
+#   filter(SOVEREIGNT != "Antarctica")  ## Drop Antarctica
+# 
+# adm10_simple_faoadded <- st_as_sf(adm10_simple_faoadded)
+
+# Load preprocessed country polygons with FAO ID
+adm_10m_fao_id_simple <- st_read("adm_10m_fao_id_simple.gpkg")
+
+# Project adm_10m_fao_id_simple to Robinson projection
+adm_10m_fao_id_simple_rob <- adm_10m_fao_id_simple %>% 
+  st_transform(., crs = "ESRI:54030")
+
+# Convert the country polygon to raster format
+cntry_raster <- 
+  rasterize(vect(adm_10m_fao_id_simple), template_rast_5arcmin, 
+            field = "FAO_ID")
+
+# Function that makes plotting a bit easier
+# This function takes arguments:
+# r_index: the raster to be plotted
+# index_label: represents the title of the plot
+# index_main_title: represents the main title of the plot
+# colorpal: the color palette we select
+# breakvals: the break values for the color palette
+# breaknames: the names for the breaks
+# color_midpoint: the midpoint value for the color palette
+# tocrs: we often want to use the Robinson projection when plotting something
+create_index_map <- function(r_index, index_label, index_main_title, colorpal, breakvals, breaknames = NULL, color_midpoint = NULL, tocrs = NA) {
+  if (!is.na(tocrs)) {
+    r_index <- project(r_index, tocrs, mask = TRUE)
+  }
+  index_map <- tm_shape(r_index) +
+    tm_raster(
+      palette = colorpal,
+      breaks = breakvals,
+      labels = breaknames,
+      title = index_label,
+      midpoint = color_midpoint,
+      legend.is.portrait = FALSE
+    ) +
+    tm_layout(
+      main.title = index_main_title,
+      main.title.position = "center",
+      main.title.size = 0.8,
+      legend.bg.color = TRUE,
+      legend.outside = TRUE,
+      legend.title.size = 1,
+      legend.text.size = 1,
+      legend.outside.size = 0.2,
+      legend.outside.position = "bottom",
+      frame = FALSE
+    ) +
+    tm_shape(adm_10m_fao_id_simple_rob) +
+    tm_borders(col = NA, lwd = 0.5)
+  
+  return (index_map)
+}
+
+# ----------------------------------------------------------- Get Daniel's data
+daniel_original <- read.csv("data_johannes.csv")
+
+
+# Combine geometries and food loss data
+country_data <- adm_10m_fao_id_simple %>% 
+  left_join(daniel_original, by = c("ISO_3166_1" = "cntry_code"))
+
+pal <- scico(n = 10, palette = "nuuk", direction = -1)
+
+```
+
+
+
+# Figure 1
+
+Average food loss data distribution based on different commodities across food supply stages: wheat (a), maize (b), rice (c), other cereals & pulses (d), fruits & vegetables (e), and roots, tubers, & oil-bearing crops (f).
+
+
+
+```{r}
+(plt_wheat <- 
+    rasterize(country_data %>% filter(basketItem2 == "wheat") %>% 
+                group_by(FAO_ID, country) %>% 
+                summarise(foodloss_mean = mean(loss_percentage1)) ,
+              template_rast_5arcmin, "foodloss_mean")  %>% 
+    create_index_map(., tocrs = "ESRI:54030",
+                     index_main_title = "(a) Wheat",
+                     index_label = "Average food loss (%)",
+                     breakvals = c(0,2,4,6,8,10,15,20,Inf),
+                     breaknames = c("<2", "2-4", "4-6","6-8", "8-10", "10-15", "15-20", ">20"),
+                     colorpal = pal))
+
+
+
+
+
+(plt_maize <- 
+    rasterize(country_data %>% filter(basketItem2 == "maize") %>% 
+                group_by(FAO_ID, country) %>% 
+                summarise(foodloss_mean = mean(loss_percentage1)) ,
+              template_rast_5arcmin, "foodloss_mean")  %>% 
+    create_index_map(., tocrs = "ESRI:54030",
+                     index_main_title = "(b) Maize",
+                     index_label = "Average food loss (%)",
+                     breakvals = c(0,2,4,6,8,10,15,20,Inf),
+                     breaknames = c("<2", "2-4", "4-6","6-8", "8-10", "10-15", "15-20", ">20"),
+                     colorpal = pal))
+
+
+
+(plt_rice <- 
+    rasterize(country_data %>% filter(basketItem2 == "rice") %>% 
+                group_by(FAO_ID, country) %>% 
+                summarise(foodloss_mean = mean(loss_percentage1)) ,
+              template_rast_5arcmin, "foodloss_mean")  %>% 
+    create_index_map(., tocrs = "ESRI:54030",
+                     index_main_title = "(c) Rice",
+                     index_label = "Average food loss (%)",
+                     breakvals = c(0,2,4,6,8,10,15,20,Inf),
+                     breaknames = c("<2", "2-4", "4-6","6-8", "8-10", "10-15", "15-20", ">20"),
+                     colorpal = pal))
+
+
+
+(plt_cereals <- 
+    rasterize(country_data %>% filter(basketItem2 == "cereals") %>% 
+                group_by(FAO_ID, country) %>% 
+                summarise(foodloss_mean = mean(loss_percentage1)) ,
+              template_rast_5arcmin, "foodloss_mean")  %>% 
+    create_index_map(., tocrs = "ESRI:54030",
+                     index_main_title = "(d) Other cereals & pulses",
+                     index_label = "Average food loss (%)",
+                     breakvals = c(0,2,4,6,8,10,15,20,Inf),
+                     breaknames = c("<2", "2-4", "4-6","6-8", "8-10", "10-15", "15-20", ">20"),
+                     colorpal = pal))
+
+
+
+(plt_fruits <- 
+    rasterize(country_data %>% filter(basketItem2 == "fruits") %>% 
+                group_by(FAO_ID, country) %>% 
+                summarise(foodloss_mean = mean(loss_percentage1)) ,
+              template_rast_5arcmin, "foodloss_mean")  %>% 
+    create_index_map(., tocrs = "ESRI:54030",
+                     index_main_title = "(e) Fruits & vegetables",
+                     index_label = "Average food loss (%)",
+                     breakvals = c(0,2,4,6,8,10,15,20,Inf),
+                     breaknames = c("<2", "2-4", "4-6","6-8", "8-10", "10-15", "15-20", ">20"),
+                     colorpal = pal))
+
+
+
+
+(plt_roots <- 
+    rasterize(country_data %>% filter(basketItem2 == "roots") %>% 
+                group_by(FAO_ID, country) %>% 
+                summarise(foodloss_mean = mean(loss_percentage1)) ,
+              template_rast_5arcmin, "foodloss_mean")  %>% 
+    create_index_map(., tocrs = "ESRI:54030",
+                     index_main_title = "(f) Roots, tubers, & oil bearing crops",
+                     index_label = "Average food loss (%)",
+                     breakvals = c(0,2,4,6,8,10,15,20,Inf),
+                     breaknames = c("<2", "2-4", "4-6","6-8", "8-10", "10-15", "15-20", ">20"),
+                     colorpal = pal))
+
+
+(plts_food_losses_commodities <- tmap_arrange(
+  plt_wheat, plt_maize, 
+  plt_rice, plt_cereals,
+  plt_fruits, plt_roots,
+  ncol = 2))
+
+
+# uncomment these!
+# tmap_save(plts_food_losses_commodities,
+#           "average_food_losses_commodities_rev.png",
+#           dpi = 300)
+# 
+# 
+# tmap_save(plts_food_losses_commodities,
+#           "average_food_losses_commodities_rev.pdf",
+#           dpi = 300)
+
+```
+
+
+
+# Figure 2
+
+Average food loss data distribution based on different food supply stages across commodities: farm (a), harvest (b), storage (c), and transport (d). 
+
+
+```{r}
+(plt_farm <- 
+    rasterize(country_data %>% filter(food_supply_stage == "Farm") %>% 
+    group_by(FAO_ID, country) %>% 
+    summarise(foodloss_mean = mean(loss_percentage1)) ,
+              template_rast_5arcmin, "foodloss_mean")  %>% 
+    create_index_map(., tocrs = "ESRI:54030",
+                     index_main_title = "(a) Farm",
+                     index_label = "Average food loss (%)",
+                     breakvals = c(0,2,4,6,8,10,15,20,Inf),
+                     breaknames = c("<2", "2-4", "4-6","6-8", "8-10", "10-15", "15-20", ">20"),
+                     colorpal = pal))
+
+
+
+(plt_harvest <- 
+    rasterize(country_data %>% filter(food_supply_stage == "Harvest") %>% 
+    group_by(FAO_ID, country) %>% 
+    summarise(foodloss_mean = mean(loss_percentage1)) ,
+              template_rast_5arcmin, "foodloss_mean")  %>% 
+    create_index_map(., tocrs = "ESRI:54030",
+                     index_main_title = "(b) Harvest",
+                     index_label = "Average food loss (%)",
+                     breakvals = c(0,2,4,6,8,10,15,20,Inf),
+                     breaknames = c("<2", "2-4", "4-6","6-8", "8-10", "10-15", "15-20", ">20"),
+                     colorpal = pal))
+
+
+
+(plt_storage <- 
+    rasterize(country_data %>% filter(food_supply_stage == "Storage") %>% 
+    group_by(FAO_ID, country) %>% 
+    summarise(foodloss_mean = mean(loss_percentage1)) ,
+              template_rast_5arcmin, "foodloss_mean")  %>% 
+    create_index_map(., tocrs = "ESRI:54030",
+                     index_main_title = "(c) Storage",
+                     index_label = "Average food loss (%)",
+                     breakvals = c(0,2,4,6,8,10,15,20,Inf),
+                     breaknames = c("<2", "2-4", "4-6","6-8", "8-10", "10-15", "15-20", ">20"),
+                     colorpal = pal))
+
+
+
+(plt_transport <- 
+    rasterize(country_data %>% filter(food_supply_stage == "Transport") %>% 
+    group_by(FAO_ID, country) %>% 
+    summarise(foodloss_mean = mean(loss_percentage1)) ,
+              template_rast_5arcmin, "foodloss_mean")  %>% 
+    create_index_map(., tocrs = "ESRI:54030",
+                     index_main_title = "(d) Transport",
+                     index_label = "Average food loss (%)",
+                     breakvals = c(0,2,4,6,8,10,15,20,Inf),
+                     breaknames = c("<2", "2-4", "4-6","6-8", "8-10", "10-15", "15-20", ">20"),
+                     colorpal = pal))
+
+
+
+(plts_food_losses_supply_stage <- tmap_arrange(
+  plt_farm,
+  plt_harvest,
+  plt_storage, 
+  plt_transport, 
+  ncol = 2))
+
+
+# uncomment these!
+# tmap_save(plts_food_losses_supply_stage,
+#           "average_food_losses_supply_stages_rev.png",
+#           dpi = 300)
+# 
+# 
+# tmap_save(plts_food_losses_supply_stage,
+#           "average_food_losses_supply_stages_rev.pdf",
+#           width = 180, height = 150, units = "mm")
+
+```
+
+
+
+# Figure Distributions of different socioeconomic variables
+
+```{r}
+# Extract data for explanatory variables, average values for 9 independent variables
+explanatory_variables_averages <-
+  country_data %>%
+  group_by(FAO_ID) %>%
+  summarise(gni_mean = mean(gni),
+            agriShr_mean = mean(agriShr),
+            agriEmp_mean = mean(agriEmp),
+            years_of_schooling_mean = mean(msch),
+            electricityRural_mean = mean(electricityRural),
+            phoneSub_mean = mean(phoneSub),
+            polStab_mean = mean(polStab),
+            export_mean = mean(export),
+            median_incLevel_num = median(as.numeric(factor(incLevel, levels = c("L", "M", "H")))))
+
+
+
+
+
+
+# plots
+
+(plt_gni_mean <- rasterize(explanatory_variables_averages, template_rast_5arcmin, "gni_mean") %>% 
+  create_index_map(., tocrs = "ESRI:54030",
+                   index_main_title = "(a) GNI per capita",
+                   index_label = "International $",
+                   breakvals = c(0,1000,2000,4000,6000,10000,Inf),
+                   breaknames = c("<1000", "1000-2000", "2000-4000","4000-6000", "6000-10000", ">10000"),
+                   colorpal = pal))
+
+
+
+
+(plt_agriShr_mean <- rasterize(explanatory_variables_averages, template_rast_5arcmin, "agriShr_mean") %>% 
+  create_index_map(., tocrs = "ESRI:54030",
+                   index_main_title = "(b) Agriculture shares of GDP",
+                   index_label = "% of GDP",
+                   breakvals = seq(0, 100, 10),
+                   breaknames = c("<10", "10-20", "20-30", "30-40", "40-50",
+                                  "50-60", "60-70","70-80", "80-90", "90-100"), 
+                   colorpal = pal))
+
+
+
+
+(plt_agriEmp_mean <- rasterize(explanatory_variables_averages, template_rast_5arcmin, "agriEmp_mean") %>% 
+  create_index_map(., tocrs = "ESRI:54030",
+                   index_main_title = "(c) Employment in agriculture",
+                   index_label = "% of total employment",
+                   breakvals = seq(0, 100, 10),
+                   breaknames = c("<10", "10-20", "20-30", "30-40", "40-50",
+                                  "50-60", "60-70","70-80", "80-90", "90-100"), 
+                   colorpal = pal))
+
+
+
+(plt_years_of_schooling_mean <- rasterize(explanatory_variables_averages, template_rast_5arcmin, "years_of_schooling_mean") %>% 
+  create_index_map(., tocrs = "ESRI:54030",
+                   index_main_title = "(d) Education",
+                   index_label = "Years",
+                   breakvals = c(0,2,4,6,8,10,Inf),
+                   breaknames = c("<2", "2-4", "4-6", "6-8", "8-10",">10"), 
+                   colorpal = pal))
+
+
+
+(plt_electricityRural_mean <- rasterize(explanatory_variables_averages, template_rast_5arcmin, "electricityRural_mean") %>% 
+  create_index_map(., tocrs = "ESRI:54030",
+                   index_main_title = "(e) Access to electricity in rural area",
+                   index_label = "% of rural population",
+                   breakvals = seq(0, 100, 10),
+                   breaknames = c("<10", "10-20", "20-30", "30-40", "40-50",
+                                  "50-60", "60-70","70-80", "80-90", "90-100"), 
+                   colorpal = pal))
+
+
+(plt_phoneSub_mean <- rasterize(explanatory_variables_averages, template_rast_5arcmin, "phoneSub_mean") %>% 
+  create_index_map(., tocrs = "ESRI:54030",
+                   index_main_title = "(f) Mobile cellular subscriptions",
+                   index_label = "% of population",
+                   breakvals = seq(0, 100, 10),
+                   breaknames = c("<10", "10-20", "20-30", "30-40", "40-50",
+                                  "50-60", "60-70","70-80", "80-90", "90-100"), 
+                   colorpal = pal))
+
+
+
+(plt_polStab_mean <- rasterize(explanatory_variables_averages, template_rast_5arcmin, "polStab_mean") %>% 
+  "*" (100) %>% 
+  create_index_map(., tocrs = "ESRI:54030",
+                   index_main_title = "(g) Political stability and absence of violence",
+                   index_label = "Index (low value=less stable; high value=more stable)",
+                   breakvals = seq(0, 100, 10),
+                   breaknames = c("<10", "10-20", "20-30", "30-40", "40-50",
+                                  "50-60", "60-70","70-80", "80-90", "90-100"), 
+                   colorpal = pal))
+
+
+
+
+(plt_export_mean <- rasterize(explanatory_variables_averages, template_rast_5arcmin, "export_mean") %>% 
+  create_index_map(., tocrs = "ESRI:54030",
+                   index_main_title = "(h) Export volume index",
+                   index_label = "Index (low value=less export; high value=more export)",
+                   breakvals = c(0, 50 , 100, 150, 200, 250, 500, 1000, Inf),
+                   breaknames = c("<50", "50-100", "100-150", "150-200", "200-250",
+                                 "250-500", "500-1000", ">1000"),
+                   colorpal = pal))
+
+
+# Income level
+# plt_incLevel <- rasterize(explanatory_variables_averages, template_rast_5arcmin, "median_incLevel_num") %>% 
+#   create_index_map(., tocrs = "ESRI:54030",
+#                    index_main_title = "(i) Income level",
+#                    index_label = "Income level",
+#                    breakvals = c(0.5, 1.5, 2.5, 3.5),
+#                    breaknames = c("Low", "Middle", "High"),
+#                    colorpal = pal)
+# 
+# plt_incLevel
+
+
+
+
+plts_figureAx <- tmap_arrange(plt_gni_mean, plt_agriShr_mean,
+                              plt_agriEmp_mean, plt_years_of_schooling_mean,
+                              plt_electricityRural_mean, plt_phoneSub_mean, 
+                              plt_polStab_mean, plt_export_mean,
+                              ncol = 2) #  plt_incLevel removed
+plts_figureAx
+
+
+# # uncomment these!
+# tmap_save(plts_figureAx,
+#           filename = "average_explanatory_variables_rev.png",
+#           dpi = 300)
+# 
+# 
+# tmap_save(plts_figureAx,
+#           filename = "average_explanatory_variables_rev.pdf",
+#           width = 180, height = 150, units = "mm")
+
+```
+
+
+# Table experiment
+
+```{r}
+# Extract data for explanatory variables, average values for 9 independent variables
+library(sf)
+library(plotrix)
+
+df_descriptive_using_countrydata <-
+  country_data %>%
+  st_drop_geometry() %>% 
+  group_by(incLevel) %>%
+  summarise(foodloss_mean = mean(loss_percentage1),
+    gni_mean = mean(gni),
+    gni_se = std.error(gni),
+    agriShr_mean = mean(agriShr),
+    agriShr_se = std.error(agriShr),
+    agriEmp_mean = mean(agriEmp),
+    agriEmp_sd =  std.error(agriEmp),
+    years_of_schooling_mean = mean(msch),
+    years_of_schooling_se = std.error(msch),
+    electricityRural_mean = mean(electricityRural),
+    electricityRural_se =  std.error(electricityRural),
+    phoneSub_mean = mean(phoneSub),
+    phoneSub_se = std.error(phoneSub),
+    polStab_mean = mean(polStab),
+    polStab_se =  std.error(polStab),
+    export_mean = mean(export),
+    export_se =  std.error(export))
+
+
+```
+
+
+#
